@@ -1,0 +1,141 @@
+# =====================================================================
+#  Tarea Semana 07 - Seguridad en Aplicaciones (UMG)
+#  Pipeline DevSecOps: SAST (Semgrep) + SBOM (Syft/CycloneDX)
+#                      + SCA (OWASP Dependency-Check) + Quality Gate
+#  Politica de fallo:
+#    - SCA : CVSS >= 7.0 (HIGH / CRITICAL)  -> build FAIL
+#    - SAST: hallazgos Semgrep con severidad ERROR (HIGH) -> build FAIL
+# =====================================================================
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------
+  # FASE 2 - SAST con Semgrep
+  # -------------------------------------------------------------------
+  sast-semgrep:
+    name: "SAST - Semgrep Code Scanning"
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - name: Checkout del codigo
+        uses: actions/checkout@v4
+
+      # 1) Escaneo completo (todas las severidades) -> reportes SARIF y JSON
+      - name: Ejecutar Semgrep (reporte completo SARIF + JSON)
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --exclude test --exclude app/assets/vendor \
+            --metrics=off \
+            --sarif --output semgrep-results.sarif \
+            --json-output=semgrep-results.json
+          echo "Hallazgos Semgrep por severidad:"
+          grep -o '"severity": *"[A-Z]*"' semgrep-results.json | sort | uniq -c || true
+
+      - name: Subir artefacto SARIF/JSON de Semgrep
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-sarif-report
+          path: |
+            semgrep-results.sarif
+            semgrep-results.json
+
+      # 2) QUALITY GATE SAST: falla si existe algun hallazgo ERROR (HIGH)
+      - name: Quality Gate SAST (falla con severidad ERROR/HIGH)
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --exclude test --exclude app/assets/vendor \
+            --metrics=off \
+            --severity ERROR \
+            --error
+
+  # -------------------------------------------------------------------
+  # FASE 3 - SBOM CycloneDX (Syft) + SCA (OWASP Dependency-Check)
+  # -------------------------------------------------------------------
+  sca-and-sbom:
+    name: "SCA & Generacion de SBOM"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del codigo
+        uses: actions/checkout@v4
+
+      # 1. Generacion del SBOM en estandar CycloneDX
+      - name: Generar SBOM con Syft (CycloneDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: "sbom.cyclonedx.json"
+          upload-artifact: false
+
+      - name: Subir artefacto SBOM (CycloneDX)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cyclonedx.json
+
+      # 2. Analisis SCA con OWASP Dependency-Check (BD NVD precargada en la imagen)
+      #    --failOnCVSS 7  -> QUALITY GATE SCA (HIGH/CRITICAL rompe el build)
+      - name: OWASP Dependency-Check Scan
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'AppSegura'
+          path: '.'
+          format: 'HTML'
+          out: 'reports'
+          args: >
+            --format JSON
+            --failOnCVSS 7
+            --enableExperimental
+            --nodeAuditSkipDevDependencies
+            --nodePackageSkipDevDependencies
+            --suppression /github/workspace/dependency-check-suppressions.xml
+
+      - name: Subir Reporte SCA
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-check-report
+          path: reports/
+
+  # -------------------------------------------------------------------
+  # FASE 4 - Quality Gate consolidado (decision final del pipeline)
+  # -------------------------------------------------------------------
+  quality-gate:
+    name: "Quality Gate (HIGH/CRITICAL = FAIL)"
+    runs-on: ubuntu-latest
+    needs: [ sast-semgrep, sca-and-sbom ]
+    if: always()
+    steps:
+      - name: Evaluar politica de fallo
+        run: |
+          SAST="${{ needs.sast-semgrep.result }}"
+          SCA="${{ needs.sca-and-sbom.result }}"
+          {
+            echo "## Resultado del Quality Gate"
+            echo ""
+            echo "| Control | Politica | Resultado |"
+            echo "|---|---|---|"
+            echo "| SAST (Semgrep) | Severidad ERROR/HIGH = FAIL | ${SAST} |"
+            echo "| SCA (Dependency-Check) | CVSS >= 7.0 = FAIL | ${SCA} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SAST" != "success" ] || [ "$SCA" != "success" ]; then
+            echo "BUILD FAIL: existen hallazgos HIGH/CRITICAL sin remediar ni excepcion documentada." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "BUILD SUCCESS: no hay hallazgos HIGH/CRITICAL abiertos." | tee -a "$GITHUB_STEP_SUMMARY"
