@@ -1,4 +1,52 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Linea base (commit 1): sin excepciones. El Quality Gate debe FALLAR. -->
+<!--
+  Excepciones documentadas (risk acceptance) - OWASP Dependency-Check
+  Tarea Semana 07 - Seguridad en Aplicaciones (UMG)
+
+  Criterio de triage aplicado:
+    1. Lo que tenia correccion compatible se CORRIGIO (no se suprime):
+       express 4.22.3, body-parser 1.20.9, underscore 1.13.8,
+       express-session 1.19.0, helmet 3.23.3, marked 4.0.10,
+       y se ELIMINO "forever" (no se usa en el codigo -> menor superficie de ataque).
+    2. Las dependencias de desarrollo (cypress, grunt, mocha...) quedan fuera
+       del alcance del gate porque no se despliegan en produccion
+       (flags nodeAuditSkipDevDependencies / nodePackageSkipDevDependencies).
+    3. Solo se suprime el riesgo residual que NO tiene correccion sin cambio
+       mayor de codigo. Se agrupa por CAUSA RAIZ (de-duplicacion de hallazgos)
+       y cada excepcion VENCE (atributo until) para obligar a reevaluarla.
+-->
 <suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+  <!-- CAUSA RAIZ 1: driver mongodb 2.x (arrastra mongodb-core, bson, require_optional/semver) -->
+  <suppress until="2026-12-31Z">
+    <notes><![CDATA[
+      TICKET: SEC-S07-001 | Responsable: equipo de desarrollo | Severidad: CRITICAL
+      Hallazgos: mongodb <=3.1.12, mongodb-core, bson <=1.1.3 (CVE-2019-2391, CVE-2020-7610),
+                 semver 5.6.0 (CVE-2022-25883) via require_optional.
+      Motivo de la excepcion: la correccion exige migrar a mongodb >= 4.x (cambio mayor de API:
+      MongoClient.connect, callbacks -> promesas) en server.js, app/data/*-dao.js y artifacts/db-reset.js.
+      Control compensatorio: BD solo accesible en red interna del laboratorio (docker bridge aislado);
+      la deserializacion BSON solo procesa datos del propio servidor.
+      Plan: migracion a mongodb 6.x en el siguiente sprint. Excepcion vence 2026-12-31.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:npm/(mongodb|mongodb\-core|bson|semver|require_optional)@.*$</packageUrl>
+    <vulnerabilityName regex="true">.*</vulnerabilityName>
+  </suppress>
+
+  <!-- CAUSA RAIZ 2: motor de plantillas swig (abandonado; arrastra optimist, minimist, uglify-js) -->
+  <suppress until="2026-12-31Z">
+    <notes><![CDATA[
+      TICKET: SEC-S07-002 | Responsable: equipo de desarrollo | Severidad: CRITICAL
+      Hallazgos: swig 1.4.2 (CVE-2023-25345, lectura arbitraria de archivos), optimist/minimist 0.0.10
+                 (CVE-2021-44906, prototype pollution), uglify-js 2.4.24 (CVE-2015-8857/8858).
+      Motivo de la excepcion: swig esta abandonado y NO existe version corregida; la unica
+      remediacion es reemplazar el motor de plantillas (todas las vistas de app/views).
+      Control compensatorio: las plantillas son archivos estaticos del repositorio (el usuario no
+      controla el nombre de la plantilla); optimist/uglify-js solo se usan en la CLI de swig, no en runtime.
+      Plan: migrar a nunjucks (sintaxis compatible con swig). Excepcion vence 2026-12-31.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:npm/(swig|optimist|minimist|uglify\-js)@.*$</packageUrl>
+    <vulnerabilityName regex="true">.*</vulnerabilityName>
+  </suppress>
+
 </suppressions>
